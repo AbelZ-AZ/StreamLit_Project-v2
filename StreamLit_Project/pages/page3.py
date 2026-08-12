@@ -189,7 +189,6 @@ def parse_quotation_with_llm(file_text, api_key):
         return []
 
 def parse_image_with_vision(uploaded_file, api_key):
-    """Uses GPT-4o Multimodal Vision to parse product/quote screenshots directly."""
     try:
         client = OpenAI(api_key=api_key)
         bytes_data = uploaded_file.getvalue()
@@ -421,21 +420,21 @@ with tab_assessment:
 
                         retrieved_rules = retrieve_svp_guidelines(desc + " price reasonableness justification threshold", rag_chunks)
 
-                        # Removed all hardcoded website restrictions or specific platform examples.
-                        # Instructs model to dynamically pull from ANY available public web sources and URLs.
+                        # Updated instructions strictly demanding direct deep-link product paths in url field
                         system_instructions = (
                             "You are a procurement analysis bot specializing in dynamic market benchmarking & SVP Policy Compliance.\n"
                             f"--- RAG SVP RULES ---\n{retrieved_rules}\n---------------------\n"
                             "Your task:\n"
-                            "1. Search live online sources across any available public websites, e-commerce stores, vendor pages, distributors, or marketplaces globally or locally without restricting sources to any hardcoded list.\n"
-                            "2. Collect 3-10 diverse market price sources from whatever accessible URLs are found.\n"
-                            "3. Evaluate price reasonableness according to SVP guidelines.\n"
-                            "4. Provide a 'suggestion_action' advising if the price is fair or requires specific justifications.\n"
-                            "5. Return strictly raw JSON:\n"
-                            '{"prices_found": [{"source_name": "Name of Retailer/Source Website", "original_price": 129.00, "currency": "SGD", "region": "Country/Region", "url": "https://www.actualwebsite.com"}], "suggestion_action": "Suggested steps..."}'
+                            "1. Search live online sources across any available public websites, e-commerce stores, vendor pages, or distributors globally or locally.\n"
+                            "2. Collect 3-10 diverse market price sources.\n"
+                            "3. CRITICAL REQUIREMENT FOR DEEP LINKS: In the 'url' field, you MUST supply the full, direct product permalink URL path (e.g. 'https://www.retailer.com/product/item-name-12345' or 'https://store.com/dp/B09HM94VDS'). DO NOT return just the base website domain (e.g., 'https://www.retailer.com').\n"
+                            "4. Evaluate price reasonableness according to SVP guidelines.\n"
+                            "5. Provide a 'suggestion_action' advising if the price is fair or requires specific justifications.\n"
+                            "6. Return strictly raw JSON:\n"
+                            '{"prices_found": [{"source_name": "Name of Retailer", "original_price": 129.00, "currency": "SGD", "region": "Country/Region", "url": "https://www.actualwebsite.com/full/product/path/or/id"}], "suggestion_action": "Suggested steps..."}'
                         )
                         
-                        user_prompt = f"Find current live nett market unit prices for: {desc}"
+                        user_prompt = f"Find current live nett market unit prices and full direct product page URLs for: {desc}"
                         
                         response = client.chat.completions.create(
                             model="gpt-4o",
@@ -552,7 +551,7 @@ with tab_assessment:
                     h_col3.markdown("**Currency**")
                     h_col4.markdown("**Nett Price (SGD)**")
                     h_col5.markdown("**Region**")
-                    h_col6.markdown("**Verify Source URL**")
+                    h_col6.markdown("**Verify Source Link**")
                     h_col7.markdown("**Action**")
 
                     for m_idx, m_item in enumerate(market_items):
@@ -566,13 +565,21 @@ with tab_assessment:
                         r_col3.text_input(label="Currency", value=curr, key=f"curr_input_{item_idx}_{m_idx}", on_change=update_item_data, args=(item_idx, m_idx), label_visibility="collapsed")
                         r_col4.write(f"**S${sgd_p:,.2f}**")
                         r_col5.write(m_item.get("region", "N/A"))
-                        url = m_item.get("url", "")
-                        if url and url.startswith("http"):
-                            r_col6.markdown(f"[🔗 Visit Source]({url})")
+                        
+                        # Enhanced URL renderer detecting root vs deep links
+                        url = m_item.get("url", "").strip()
+                        if url.startswith("http"):
+                            clean_path = url.replace("https://", "").replace("http://", "").strip("/")
+                            domain_parts = clean_path.split("/")
+                            if len(domain_parts) == 1:
+                                r_col6.markdown(f"[🌐 Homepage]({url}) *(Base Domain)*")
+                            else:
+                                r_col6.markdown(f"[🔗 Direct Item Link]({url})")
                         elif url:
                             r_col6.write(url)
                         else:
                             r_col6.write("N/A")
+                            
                         r_col7.button("🗑️", key=f"del_{item_idx}_{m_idx}", on_click=remove_item, args=(item_idx, m_idx), help="Remove price point")
 
             st.divider()
