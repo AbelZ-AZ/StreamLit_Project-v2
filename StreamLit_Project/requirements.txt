@@ -1,6 +1,8 @@
 streamlit
 openai
-tiktoken
-langchain
-langchain-experimental
+scikit-learn
 pandas
+numpy
+python-docx
+pypdf
+openpyxl
