@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import json
 import urllib.request
+import urllib.parse
 import re
 import base64
 from datetime import datetime
@@ -420,21 +421,19 @@ with tab_assessment:
 
                         retrieved_rules = retrieve_svp_guidelines(desc + " price reasonableness justification threshold", rag_chunks)
 
-                        # Updated instructions strictly demanding direct deep-link product paths in url field
                         system_instructions = (
                             "You are a procurement analysis bot specializing in dynamic market benchmarking & SVP Policy Compliance.\n"
                             f"--- RAG SVP RULES ---\n{retrieved_rules}\n---------------------\n"
                             "Your task:\n"
-                            "1. Search live online sources across any available public websites, e-commerce stores, vendor pages, or distributors globally or locally.\n"
+                            "1. Estimate realistic market price points across public retailers/distributors.\n"
                             "2. Collect 3-10 diverse market price sources.\n"
-                            "3. CRITICAL REQUIREMENT FOR DEEP LINKS: In the 'url' field, you MUST supply the full, direct product permalink URL path (e.g. 'https://www.retailer.com/product/item-name-12345' or 'https://store.com/dp/B09HM94VDS'). DO NOT return just the base website domain (e.g., 'https://www.retailer.com').\n"
-                            "4. Evaluate price reasonableness according to SVP guidelines.\n"
-                            "5. Provide a 'suggestion_action' advising if the price is fair or requires specific justifications.\n"
-                            "6. Return strictly raw JSON:\n"
-                            '{"prices_found": [{"source_name": "Name of Retailer", "original_price": 129.00, "currency": "SGD", "region": "Country/Region", "url": "https://www.actualwebsite.com/full/product/path/or/id"}], "suggestion_action": "Suggested steps..."}'
+                            "3. Evaluate price reasonableness according to SVP guidelines.\n"
+                            "4. Provide a 'suggestion_action' advising if the price is fair or requires specific justifications.\n"
+                            "5. Return strictly raw JSON:\n"
+                            '{"prices_found": [{"source_name": "Name of Retailer", "original_price": 129.00, "currency": "SGD", "region": "Country/Region", "url": "https://www.actualwebsite.com"}], "suggestion_action": "Suggested steps..."}'
                         )
                         
-                        user_prompt = f"Find current live nett market unit prices and full direct product page URLs for: {desc}"
+                        user_prompt = f"Find current live market unit prices for: {desc}"
                         
                         response = client.chat.completions.create(
                             model="gpt-4o",
@@ -559,26 +558,28 @@ with tab_assessment:
                         orig_p = float(m_item.get("original_price", 0.0))
                         curr = str(m_item.get("currency", "SGD")).upper()
                         sgd_p = float(m_item.get("price_sgd", 0.0))
+                        source_name = m_item.get("source_name", "Retailer").strip()
                         
-                        r_col1.write(m_item.get("source_name", "N/A"))
+                        r_col1.write(source_name if source_name else "N/A")
                         r_col2.number_input(label="Price", value=orig_p, min_value=0.0, step=1.0, format="%.2f", key=f"price_input_{item_idx}_{m_idx}", on_change=update_item_data, args=(item_idx, m_idx), label_visibility="collapsed")
                         r_col3.text_input(label="Currency", value=curr, key=f"curr_input_{item_idx}_{m_idx}", on_change=update_item_data, args=(item_idx, m_idx), label_visibility="collapsed")
                         r_col4.write(f"**S${sgd_p:,.2f}**")
                         r_col5.write(m_item.get("region", "N/A"))
                         
-                        # Enhanced URL renderer detecting root vs deep links
+                        # --- DYNAMIC SEARCH & VERIFICATION PERMALINKS (METHOD 1 FIX) ---
                         url = m_item.get("url", "").strip()
-                        if url.startswith("http"):
-                            clean_path = url.replace("https://", "").replace("http://", "").strip("/")
-                            domain_parts = clean_path.split("/")
-                            if len(domain_parts) == 1:
-                                r_col6.markdown(f"[🌐 Homepage]({url}) *(Base Domain)*")
-                            else:
-                                r_col6.markdown(f"[🔗 Direct Item Link]({url})")
-                        elif url:
-                            r_col6.write(url)
+                        search_query = urllib.parse.quote(f"{desc} {source_name}")
+                        google_search_url = f"https://www.google.com/search?q={search_query}"
+
+                        if url.startswith("http") and any(path in url for path in ["/p/", "/dp/", "/product/", "item"]):
+                            # Deep product permalink available
+                            r_col6.markdown(f"[🔗 Item Link]({url}) · [🔍 Verify]({google_search_url})")
+                        elif url.startswith("http"):
+                            # Root domain returned - provide jump to direct item search
+                            r_col6.markdown(f"[🌐 {source_name[:12]}]({url}) · [🔍 Search Item]({google_search_url})")
                         else:
-                            r_col6.write("N/A")
+                            # Fallback search verification link
+                            r_col6.markdown(f"[🔍 Search on Google]({google_search_url})")
                             
                         r_col7.button("🗑️", key=f"del_{item_idx}_{m_idx}", on_click=remove_item, args=(item_idx, m_idx), help="Remove price point")
 
