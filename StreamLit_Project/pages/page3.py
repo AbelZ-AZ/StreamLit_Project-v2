@@ -313,7 +313,7 @@ tab_assessment, tab_chat = st.tabs(["📊 Price Assessment & Approval", "💬 SV
 # ==============================================================================
 with tab_assessment:
     st.title("⚖️ Price Reasonableness Assessment & Approval Helper")
-    st.subheader("Evaluate Small Value Purchases (SVP) via Singapore Sourcing, RAG Rules & IQR Analysis")
+    st.subheader("Evaluate Small Value Purchases (SVP) via Dynamic Market Sourcing, RAG Rules & IQR Analysis")
     st.divider()
 
     st.markdown("### 📄 Step 1: Upload Quotation & Supplier Details")
@@ -409,7 +409,7 @@ with tab_assessment:
             client = OpenAI(api_key=user_api_key)
             assessment_results = []
             
-            with st.spinner("Searching Singapore market benchmarks & checking SVP policy compliance..."):
+            with st.spinner("Searching available web sources across the market & checking SVP policy compliance..."):
                 try:
                     for idx, row in edited_df.iterrows():
                         desc = str(row.get("Item Description", "")).strip()
@@ -421,16 +421,18 @@ with tab_assessment:
 
                         retrieved_rules = retrieve_svp_guidelines(desc + " price reasonableness justification threshold", rag_chunks)
 
+                        # Removed all hardcoded website restrictions or specific platform examples.
+                        # Instructs model to dynamically pull from ANY available public web sources and URLs.
                         system_instructions = (
-                            "You are a procurement analysis bot specializing in Singapore market benchmarking & SVP Policy Compliance.\n"
+                            "You are a procurement analysis bot specializing in dynamic market benchmarking & SVP Policy Compliance.\n"
                             f"--- RAG SVP RULES ---\n{retrieved_rules}\n---------------------\n"
                             "Your task:\n"
-                            "1. Search live online sources for the specified product, prioritizing Singapore retailers.\n"
-                            "2. Collect 3-10 market price sources.\n"
+                            "1. Search live online sources across any available public websites, e-commerce stores, vendor pages, distributors, or marketplaces globally or locally without restricting sources to any hardcoded list.\n"
+                            "2. Collect 3-10 diverse market price sources from whatever accessible URLs are found.\n"
                             "3. Evaluate price reasonableness according to SVP guidelines.\n"
                             "4. Provide a 'suggestion_action' advising if the price is fair or requires specific justifications.\n"
                             "5. Return strictly raw JSON:\n"
-                            '{"prices_found": [{"source_name": "Lazada SG", "original_price": 129.00, "currency": "SGD", "region": "Singapore", "url": "https://www.lazada.sg"}], "suggestion_action": "Suggested steps..."}'
+                            '{"prices_found": [{"source_name": "Name of Retailer/Source Website", "original_price": 129.00, "currency": "SGD", "region": "Country/Region", "url": "https://www.actualwebsite.com"}], "suggestion_action": "Suggested steps..."}'
                         )
                         
                         user_prompt = f"Find current live nett market unit prices for: {desc}"
@@ -619,7 +621,6 @@ with tab_assessment:
             st.markdown("#### 📋 Copy-Ready Draft Email")
             st.code(email_output, language="markdown")
 
-            # Simple Memo Downloader
             st.download_button(
                 label="📥 Download Audit Memo (.txt)",
                 data=email_output,
@@ -653,38 +654,25 @@ with tab_chat:
                     try:
                         retrieved_context = retrieve_svp_guidelines(user_query, rag_chunks, top_k=3)
                         
-                        chat_client = OpenAI(api_key=user_api_key)
+                        client = OpenAI(api_key=user_api_key)
                         chat_prompt = (
-                            "You are an expert procurement compliance advisor.\n"
-                            "Answer the user's question accurately using ONLY the provided SVP Policy Guidelines.\n"
-                            "If the answer is not in the context, state clearly what the general practice is while recommending consulting the formal policy.\n\n"
-                            f"--- RETRIEVED SVP POLICY GUIDELINES ---\n{retrieved_context}\n---------------------\n"
-                            f"USER QUESTION: {user_query}"
+                            "You are an expert SVP Procurement Policy Assistant.\n"
+                            f"--- RELEVANT POLICY GUIDELINES ---\n{retrieved_context}\n-----------------------------------\n"
+                            "Answer the user's question accurately and concisely based on the guidelines above."
                         )
                         
-                        response = chat_client.chat.completions.create(
+                        messages = [{"role": "system", "content": chat_prompt}]
+                        for m in st.session_state.chat_messages:
+                            messages.append({"role": m["role"], "content": m["content"]})
+                            
+                        response = client.chat.completions.create(
                             model="gpt-4o",
-                            messages=[{"role": "user", "content": chat_prompt}],
-                            temperature=0.3
+                            messages=messages,
                         )
-                        
-                        bot_reply = response.choices[0].message.content
-                        st.markdown(bot_reply)
-                        st.session_state.chat_messages.append({"role": "assistant", "content": bot_reply})
+                        assistant_reply = response.choices[0].message.content
+                        st.markdown(assistant_reply)
+                        st.session_state.chat_messages.append({"role": "assistant", "content": assistant_reply})
                     except Exception as e:
-                        st.error(f"Error querying assistant: {e}")
-
-# --- HISTORICAL AUDIT TRAIL ---
-if st.session_state.search_history:
-    st.divider()
-    with st.expander("📜 Historical Assessment Audit Trail", expanded=False):
-        for h_idx, record in enumerate(reversed(st.session_state.search_history)):
-            st.markdown(f"#### 📅 {record['timestamp']} — Supplier: `{record['supplier_name'] or 'N/A'}` (Ref: `{record['quotation_ref'] or 'N/A'}`)")
-            st.markdown(f"**Total Quote Value:** S${record['total_cost']:,.2f}")
-            for item in record["results"]:
-                st.markdown(f"- **Item:** {item['item_description']} | **Qty:** {item['quantity']} | **Quoted Unit Rate:** S${item['quoted_unit_rate']:,.2f} | **Line Total:** S${item['quoted_line_total']:,.2f}")
-            st.divider()
-
-# --- FOOTER ---
-st.divider()
-st.caption("GenAI Procurement Assistant • Singapore Sourcing & IQR Analytics • SVP Policy Assistant")
+                        err_msg = f"Error generating response: {e}"
+                        st.error(err_msg)
+                        st.session_state.chat_messages.append({"role": "assistant", "content": err_msg})
