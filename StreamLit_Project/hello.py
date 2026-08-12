@@ -19,9 +19,24 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
 
-# --- 3. LOGIN PAGE FUNCTION ---
+# --- 3. DISCLAIMER HELPER FUNCTION ---
+def display_disclaimer():
+    with st.expander("📋 Required Disclaimer", expanded=False):
+        st.caption(
+            "**IMPORTANT NOTICE:** This application is developed for decision-support "
+            "and informational purposes only. AI-generated analysis, cost assessments, "
+            "and recommendations must be independently reviewed and verified by an authorized "
+            "procurement officer before final decision-making or formal approval. "
+            "This system does not replace human professional judgment or organizational policies."
+        )
+
+
+# --- 4. LOGIN PAGE FUNCTION ---
 def login_page():
     st.title("🔐 Login Page")
+
+    # Display disclaimer on main login page
+    display_disclaimer()
 
     with st.form("login_form"):
         username = st.text_input("Username")
@@ -39,15 +54,15 @@ def login_page():
                 st.error("Invalid credentials")
 
 
-# --- 4. LOGOUT FUNCTION ---
+# --- 5. LOGOUT FUNCTION ---
 def logout():
     st.session_state.logged_in = False
     st.session_state.role = None
     st.rerun()
 
 
-# --- 5. MULTI-PAGE NAVIGATION LOGIC ---
-# Updated paths to point to the "pages" subdirectory
+# --- 6. MULTI-PAGE NAVIGATION LOGIC ---
+# Paths pointing to the "pages" subdirectory
 login_screen = st.Page(login_page, title="Login", icon="🔒")
 page_1 = st.Page("pages/page1.py", title="About Us", icon="🤖")
 page_2 = st.Page("pages/page2.py", title="Methodology", icon="📊")
@@ -60,7 +75,11 @@ if not st.session_state.logged_in:
 else:
     # Expose the sub-pages after login
     pg = st.navigation([page_1, page_2, page_3])
-    st.sidebar.button("Log out", on_click=logout)
+
+    # Show disclaimer in the sidebar for logged-in users
+    with st.sidebar:
+        display_disclaimer()
+        st.button("Log out", on_click=logout)
 
 # Run the selected page
 pg.run()
