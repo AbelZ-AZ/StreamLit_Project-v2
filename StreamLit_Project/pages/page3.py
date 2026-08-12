@@ -642,44 +642,50 @@ with tab_chat:
     st.title("💬 SVP Policy Assistant")
     st.caption("Ask questions about Small Value Purchase rules, justification criteria, or threshold compliance.")
     
-    # Render chat messages
+    # Render historical chat messages
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            
-    # Chat Input Box
-    if user_query := st.chat_input("Ask a policy question (e.g., 'What is the maximum limit for SVP?')"):
-        st.session_state.chat_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
 
-        if not user_api_key:
-            st.warning("🔑 Please enter your OpenAI API key in the sidebar to talk to the Assistant.")
-        else:
-            with st.chat_message("assistant"):
-                with st.spinner("Searching SVP policy rules..."):
-                    try:
-                        retrieved_context = retrieve_svp_guidelines(user_query, rag_chunks, top_k=3)
-                        
-                        client = OpenAI(api_key=user_api_key)
-                        chat_prompt = (
-                            "You are an expert SVP Procurement Policy Assistant.\n"
-                            f"--- RELEVANT POLICY GUIDELINES ---\n{retrieved_context}\n-----------------------------------\n"
-                            "Answer the user's question accurately and concisely based on the guidelines above."
-                        )
-                        
-                        messages = [{"role": "system", "content": chat_prompt}]
-                        for m in st.session_state.chat_messages:
-                            messages.append({"role": m["role"], "content": m["content"]})
-                            
-                        response = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=messages,
-                        )
-                        assistant_reply = response.choices[0].message.content
-                        st.markdown(assistant_reply)
-                        st.session_state.chat_messages.append({"role": "assistant", "content": assistant_reply})
-                    except Exception as e:
-                        err_msg = f"Error generating response: {e}"
-                        st.error(err_msg)
-                        st.session_state.chat_messages.append({"role": "assistant", "content": err_msg})
+    # Process new user input
+    if prompt := st.chat_input("Ask a question about SVP policy..."):
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            if not user_api_key:
+                response_text = "🔑 **API Key Missing**: Please enter your OpenAI API key in the sidebar to use the Q&A Assistant."
+                st.markdown(response_text)
+                st.session_state.chat_messages.append({"role": "assistant", "content": response_text})
+            else:
+                context_chunks = retrieve_svp_guidelines(prompt, rag_chunks, top_k=3)
+                
+                chat_system_prompt = (
+                    "You are an expert Procurement Policy Assistant specializing in Small Value Purchase (SVP) guidelines.\n"
+                    "Use the following official guidelines context to answer the user's questions clearly, accurately, and concisely.\n"
+                    "If the answer is not explicitly contained in the guidelines, answer using standard corporate procurement logic while noting policy boundaries.\n\n"
+                    f"--- POLICY CONTEXT ---\n{context_chunks if context_chunks else SVP_PROCESS_DOC}\n----------------------"
+                )
+
+                client = OpenAI(api_key=user_api_key)
+                
+                # Build chat history context
+                messages_for_llm = [{"role": "system", "content": chat_system_prompt}]
+                for m in st.session_state.chat_messages:
+                    messages_for_llm.append({"role": m["role"], "content": m["content"]})
+
+                try:
+                    stream = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=messages_for_llm,
+                        temperature=0.2,
+                        stream=True
+                    )
+                    
+                    full_response = st.write_stream(stream)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": full_response})
+                except Exception as e:
+                    err_msg = f"Error generating response: {e}"
+                    st.error(err_msg)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": err_msg})
