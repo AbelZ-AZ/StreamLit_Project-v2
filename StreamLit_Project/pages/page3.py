@@ -36,25 +36,10 @@ st.set_page_config(
 # ==============================================================================
 # --- HELPER FUNCTIONS & KNOWLEDGE BASE LOADERS ---
 # ==============================================================================
-def find_template_file(filename):
-    """Dynamically locates template files across possible repository paths."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    possible_paths = [
-        os.path.join(base_dir, "templates", filename),
-        os.path.join(base_dir, "StreamLit_Project", "templates", filename),
-        os.path.join("templates", filename),
-        os.path.join("StreamLit_Project", "templates", filename)
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-    return None
-
-
 @st.cache_data
 def load_docx_from_repo(file_path):
     """Loads and extracts text from a .docx file stored in the GitHub repository."""
-    if not file_path or not os.path.exists(file_path):
+    if not os.path.exists(file_path):
         return ""
     if docx is None:
         st.error("The 'python-docx' package is missing. Please run 'pip install python-docx'.")
@@ -259,11 +244,13 @@ def scan_and_extract_file(uploaded_file, api_key):
 # ==============================================================================
 def search_market_prices_openai(item_description, user_openai_key, retrieved_rules, exchange_rates):
     """
-    Executes live web search using OpenAI Responses API,
-    prioritizing major Singapore retailers & local SME suppliers, explicitly excluding second-hand C2C platforms like Carousell.
+    Executes live web search using OpenAI Responses API (client.responses.create with tools=[{"type": "web_search"}]),
+    prioritizing major Singapore retailers & local SME suppliers, explicitly excluding second-hand C2C platforms like Carousell,
+    accurately extracting numeric prices, and evaluating against retrieved SVP Policy rules.
     """
     client = OpenAI(api_key=user_openai_key)
 
+    # Native OpenAI Responses API Web Search Engine
     system_instructions = (
         "You are a procurement analysis bot specializing in Singapore market benchmarking & SVP Policy Compliance.\n"
         f"--- RETRIEVED REPO SVP POLICY RULES ---\n{retrieved_rules}\n---------------------\n"
@@ -311,6 +298,7 @@ def search_market_prices_openai(item_description, user_openai_key, retrieved_rul
     web_items = data.get("prices_found", [])
 
     for item in web_items:
+        # Robust conversion ensuring original numeric value is preserved
         try:
             orig_p = float(re.sub(r"[^\d\.]", "", str(item.get("original_price", 0.0))))
         except ValueError:
@@ -319,6 +307,8 @@ def search_market_prices_openai(item_description, user_openai_key, retrieved_rul
         item["original_price"] = orig_p
         curr = str(item.get("currency", "SGD")).upper().strip()
         item["currency"] = curr
+        
+        # Nett SGD price defaults directly to original price for SGD; converts for foreign currencies
         item["price_sgd"] = orig_p if curr == "SGD" else convert_to_sgd(orig_p, curr, exchange_rates)
 
     return web_items, data.get("suggestion_action", "")
@@ -341,12 +331,20 @@ if "chat_messages" not in st.session_state:
 exchange_rates = get_exchange_rates_to_sgd()
 
 # --- LOAD REPOSITORY KNOWLEDGE BASE AUTOMATICALLY ---
-POLICY_PATH = find_template_file("svp_process.docx")
-svp_policy_text = load_docx_from_repo(POLICY_PATH) if POLICY_PATH else ""
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+PRIMARY_POLICY_PATH = os.path.join(BASE_DIR, "templates", "svp_process.docx")
+ALT_POLICY_PATH = os.path.join("StreamLit_Project", "templates", "svp_process.docx")
+POLICY_PATH = PRIMARY_POLICY_PATH if os.path.exists(PRIMARY_POLICY_PATH) else ALT_POLICY_PATH
+
+svp_policy_text = load_docx_from_repo(POLICY_PATH)
 rag_chunks = chunk_text(svp_policy_text)
 
-TEMPLATE_PATH = find_template_file("email_template.docx")
-email_template_text = load_docx_from_repo(TEMPLATE_PATH) if TEMPLATE_PATH else ""
+PRIMARY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "email_template.docx")
+ALT_TEMPLATE_PATH = os.path.join("StreamLit_Project", "templates", "email_template.docx")
+TEMPLATE_PATH = PRIMARY_TEMPLATE_PATH if os.path.exists(PRIMARY_TEMPLATE_PATH) else ALT_TEMPLATE_PATH
+
+email_template_text = load_docx_from_repo(TEMPLATE_PATH)
 
 
 # ==============================================================================
@@ -450,4 +448,327 @@ with tab_assessment:
     st.caption("Populated from scanned quote file or entered manually below. Total costs compute automatically.")
 
     edited_df = st.data_editor(
-        st.session_state.line_items_data
+        st.session_state.line_items_data,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Item Description": st.column_config.TextColumn("Item Description", width="large", required=True),
+            "Quantity": st.column_config.NumberColumn("Quantity", min_value=1, step=1, required=True),
+            "Unit Rate (SGD, incl. GST)": st.column_config.NumberColumn("Unit Rate (S$, incl. GST)", min_value=0.01, format="S$%.2f", required=True)
+        }
+    )
+
+    if not edited_df.empty:
+        edited_df["Quantity"] = pd.to_numeric(edited_df["Quantity"], errors="coerce").fillna(1)
+        edited_df["Unit Rate (SGD, incl. GST)"] = pd.to_numeric(edited_df["Unit Rate (SGD, incl. GST)"], errors="coerce").fillna(0.0)
+        edited_df["Total Cost (SGD)"] = edited_df["Quantity"] * edited_df["Unit Rate (SGD, incl. GST)"]
+        
+        total_quote_cost = float(edited_df["Total Cost (SGD)"].sum())
+        
+        col_tot1, col_tot2, col_tot3 = st.columns(3)
+        col_tot1.metric("Total Line Items", f"{len(edited_df)}")
+        col_tot2.metric("Total Calculated Quote Cost", f"S${total_quote_cost:,.2f}")
+        col_tot3.caption(f"Supplier: **{supplier_name if supplier_name else 'N/A'}**\n\nRef: **{quotation_ref if quotation_ref else 'N/A'}**")
+    else:
+        total_quote_cost = 0.0
+
+    submit_button = st.button("Assess Market Price Reasonableness & SVP Policy Compliance", type="primary")
+
+    # Interactive table modification callbacks for manual price overrides
+    def remove_item(item_idx, market_idx):
+        st.session_state.assessment_results[item_idx]["market_items"].pop(market_idx)
+
+    def update_item_data(item_idx, market_idx):
+        price_key = f"price_input_{item_idx}_{market_idx}"
+        curr_key = f"curr_input_{item_idx}_{market_idx}"
+        if price_key in st.session_state and curr_key in st.session_state:
+            new_price = float(st.session_state[price_key])
+            new_curr = str(st.session_state[curr_key]).upper().strip()
+            target = st.session_state.assessment_results[item_idx]["market_items"][market_idx]
+            target["original_price"] = new_price
+            target["currency"] = new_curr
+            target["price_sgd"] = new_price if new_curr == "SGD" else convert_to_sgd(new_price, new_curr, exchange_rates)
+
+    if submit_button:
+        if not user_api_key:
+            st.error("🔑 Please enter your OpenAI API Key in the sidebar to proceed.")
+        elif edited_df.empty or total_quote_cost <= 0:
+            st.error("⚠️ Please enter at least one line item with a valid unit rate and quantity.")
+        else:
+            assessment_results = []
+            
+            with st.spinner("Searching Singapore market benchmarks (major retailers & local SMEs, excluding Carousell) & checking SVP policy compliance..."):
+                try:
+                    for idx, row in edited_df.iterrows():
+                        desc = str(row.get("Item Description", "")).strip()
+                        qty = int(row.get("Quantity", 1))
+                        unit_rate = float(row.get("Unit Rate (SGD, incl. GST)", 0.0))
+                        
+                        if not desc or unit_rate <= 0:
+                            continue
+
+                        # RAG Rule Context Retrieval
+                        retrieved_rules = retrieve_svp_guidelines(desc + " price reasonableness justification threshold", rag_chunks)
+
+                        # Execution via native OpenAI Responses API Search Engine
+                        web_items, suggestion = search_market_prices_openai(
+                            item_description=desc,
+                            user_openai_key=user_api_key,
+                            retrieved_rules=retrieved_rules,
+                            exchange_rates=exchange_rates
+                        )
+
+                        assessment_results.append({
+                            "item_description": desc,
+                            "quantity": qty,
+                            "quoted_unit_rate": unit_rate,
+                            "quoted_line_total": unit_rate * qty,
+                            "market_items": web_items,
+                            "suggestion": suggestion
+                        })
+
+                    st.session_state.assessment_results = assessment_results
+                    st.session_state.assessed = True
+
+                    history_entry = {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "supplier_name": supplier_name,
+                        "quotation_ref": quotation_ref,
+                        "total_cost": total_quote_cost,
+                        "results": assessment_results
+                    }
+                    st.session_state.search_history.append(history_entry)
+
+                except Exception as e:
+                    st.error(f"An error occurred while connecting to OpenAI API: {e}")
+
+    # Display Assessment Results
+    if st.session_state.assessed and st.session_state.assessment_results:
+        st.divider()
+        st.markdown("### 📊 Assessment Outcome & Guidance Summary")
+        
+        if supplier_name or quotation_ref:
+            st.info(f"**Supplier:** {supplier_name if supplier_name else 'N/A'} | **Quote Ref:** {quotation_ref if quotation_ref else 'N/A'}")
+
+        all_quoted_items = []
+
+        for item_idx, res in enumerate(st.session_state.assessment_results):
+            desc = res["item_description"]
+            qty = res["quantity"]
+            quoted_unit_rate = res["quoted_unit_rate"]
+            market_items = res["market_items"]
+            
+            st.markdown(f"#### 📦 Item {item_idx + 1}: {desc} (Qty: {qty})")
+            
+            if not market_items or len(market_items) < 3:
+                st.warning("⚠️ Fewer than 3 market price sources available for this item.")
+            
+            if market_items:
+                for m in market_items:
+                    orig_p = float(m.get("original_price", 0.0))
+                    curr = str(m.get("currency", "SGD")).upper()
+                    m["price_sgd"] = orig_p if curr == "SGD" else convert_to_sgd(orig_p, curr, exchange_rates)
+
+                df_m = pd.DataFrame(market_items)
+                df_m["price_sgd"] = df_m["price_sgd"].astype(float)
+                prices = df_m["price_sgd"].values
+                
+                q1 = float(np.percentile(prices, 25))
+                median = float(np.median(prices))
+                q3 = float(np.percentile(prices, 75))
+                iqr = q3 - q1
+                
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Quoted Unit Rate", f"S${quoted_unit_rate:,.2f}")
+                m2.metric("25th Percentile (Q1)", f"S${q1:,.2f}")
+                m3.metric("Median (Q2)", f"S${median:,.2f}")
+                m4.metric("IQR Range", f"S${iqr:,.2f}")
+                
+                if quoted_unit_rate <= q1:
+                    st.success(
+                        f"✅ **Reasonable Price**: Quoted unit rate (**S${quoted_unit_rate:,.2f}**) is **at or below** "
+                        f"the 25th percentile target (**S${q1:,.2f}**)."
+                    )
+                    outcome_status = "Reasonable (At/Below Q1)"
+                elif quoted_unit_rate <= median:
+                    st.warning(
+                        f"⚠️ **Acceptable Price**: Quoted unit rate (**S${quoted_unit_rate:,.2f}**) is above Q1 "
+                        f"(**S${q1:,.2f}**) but within the median market rate (**S${median:,.2f}**)."
+                    )
+                    outcome_status = "Acceptable (Within Median)"
+                else:
+                    st.error(
+                        f"❌ **Higher Price**: Quoted unit rate (**S${quoted_unit_rate:,.2f}**) exceeds "
+                        f"the target Q1 baseline (**S${q1:,.2f}**) and median market benchmark (**S${median:,.2f}**)."
+                    )
+                    outcome_status = "Higher than Median (Justification Required)"
+                
+                if res.get("suggestion"):
+                    st.info(f"💡 **SVP Suggestion**: {res['suggestion']}")
+
+                all_quoted_items.append({"desc": desc, "quoted": quoted_unit_rate, "q1": q1, "median": median, "status": outcome_status})
+
+                with st.expander(f"🔍 View & Manually Overwrite Market Data Points ({len(market_items)} sources)", expanded=False):
+                    st.caption("💡 **Manual Price Overwrite**: If any price or currency was extracted incorrectly by web search, edit the values below. Metrics will recalculate automatically.")
+                    
+                    h_col1, h_col2, h_col3, h_col4, h_col5, h_col6, h_col7 = st.columns([2.2, 1.8, 1.3, 1.8, 1.2, 2.5, 1.0])
+                    h_col1.markdown("**Source / Retailer**")
+                    h_col2.markdown("**Original Price**")
+                    h_col3.markdown("**Currency**")
+                    h_col4.markdown("**Nett Price (SGD)**")
+                    h_col5.markdown("**Region**")
+                    h_col6.markdown("**Verify Source URL**")
+                    h_col7.markdown("**Action**")
+
+                    for m_idx, m_item in enumerate(market_items):
+                        r_col1, r_col2, r_col3, r_col4, r_col5, r_col6, r_col7 = st.columns([2.2, 1.8, 1.3, 1.8, 1.2, 2.5, 1.0])
+                        orig_p = float(m_item.get("original_price", 0.0))
+                        curr = str(m_item.get("currency", "SGD")).upper()
+                        sgd_p = float(m_item.get("price_sgd", 0.0))
+                        
+                        r_col1.write(m_item.get("source_name", "N/A"))
+                        r_col2.number_input(
+                            label="Price",
+                            value=orig_p,
+                            min_value=0.0,
+                            step=1.0,
+                            format="%.2f",
+                            key=f"price_input_{item_idx}_{m_idx}",
+                            on_change=update_item_data,
+                            args=(item_idx, m_idx),
+                            label_visibility="collapsed"
+                        )
+                        r_col3.text_input(
+                            label="Currency",
+                            value=curr,
+                            key=f"curr_input_{item_idx}_{m_idx}",
+                            on_change=update_item_data,
+                            args=(item_idx, m_idx),
+                            label_visibility="collapsed"
+                        )
+                        r_col4.write(f"**S${sgd_p:,.2f}**")
+                        r_col5.write(m_item.get("region", "N/A"))
+                        url = m_item.get("url", "")
+                        if url and url.startswith("http"):
+                            r_col6.markdown(f"[🔗 Visit Source]({url})")
+                        elif url:
+                            r_col6.write(url)
+                        else:
+                            r_col6.write("N/A")
+                        r_col7.button("🗑️", key=f"del_{item_idx}_{m_idx}", on_click=remove_item, args=(item_idx, m_idx), help="Remove price point")
+
+            st.divider()
+
+        # Generate Approval Email Draft
+        st.markdown("### ✉️ Generate Approval Email from Repository Template")
+        if not email_template_text:
+            st.error("❌ `email_template.docx` missing in `templates/` folder.")
+        else:
+            e_col1, e_col2 = st.columns(2)
+            with e_col1:
+                director_name = st.text_input("Director's Name", value="Dr. Tan")
+                project_purpose = st.text_input("Purpose / Project", value="Replacement equipment for team deployment")
+            with e_col2:
+                selected_justification = st.selectbox(
+                    "Primary Selection Justification",
+                    [
+                        "Lowest total cost available on market",
+                        "Faster delivery timeline / urgent deployment critical for project",
+                        "Sole authorized distributor in Singapore",
+                        "Technical compliance / exact operational requirements met"
+                    ]
+                )
+
+            if st.button("📧 Generate Approval Email Draft", type="secondary"):
+                email_body = f"""Subject: Approval Request for Small Value Purchase (SVP) - {supplier_name if supplier_name else 'Vendor'} ({quotation_ref if quotation_ref else 'N/A'})
+
+Dear {director_name},
+
+I would like to seek your approval for the procurement of the following item(s) under Small Value Purchase (SVP) guidelines:
+
+--- QUOTATION SUMMARY ---
+Supplier: {supplier_name if supplier_name else 'N/A'}
+Reference No.: {quotation_ref if quotation_ref else 'N/A'}
+Total Value: S${total_quote_cost:,.2f}
+Purpose: {project_purpose}
+
+--- PRICE REASONABLENESS & IQR BENCHMARK ---
+"""
+                for item_stat in all_quoted_items:
+                    email_body += f"• Item: {item_stat['desc']}\n  Quoted Rate: S${item_stat['quoted']:,.2f} | 25th Percentile Target (Q1): S${item_stat['q1']:,.2f} | Median: S${item_stat['median']:,.2f}\n  Status: {item_stat['status']}\n\n"
+
+                email_body += f"""--- JUSTIFICATION & SVP COMPLIANCE ---
+Justification: {selected_justification}
+
+Market price benchmarking was conducted against Singapore e-commerce and retail sources. The prices have been evaluated for reasonableness in accordance with our organization's SVP procurement policy.
+
+Seeking your approval to proceed with this purchase, please.
+
+Thank you.
+
+Best regards,
+Procurement Officer
+"""
+                st.text_area("Generated Approval Email Text", value=email_body, height=350)
+
+
+# ==============================================================================
+# TAB 2: SVP POLICY Q&A CHATBOT
+# ==============================================================================
+with tab_chat:
+    st.title("💬 SVP Policy & Procurement Compliance Chatbot")
+    st.caption("Ask questions about procurement guidelines, threshold rules, or approval steps. Grounded in your repository's `svp_process.docx`.")
+    st.divider()
+
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if user_input := st.chat_input("Ask a question about SVP rules or compliance..."):
+        st.session_state.chat_messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        if not user_api_key:
+            reply = "🔑 Please enter your OpenAI API key in the sidebar to chat with the SVP Policy bot."
+            st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+            with st.chat_message("assistant"):
+                st.markdown(reply)
+        else:
+            with st.spinner("Checking SVP Policy document..."):
+                retrieved_context = retrieve_svp_guidelines(user_input, rag_chunks, top_k=3)
+                
+                chat_system_prompt = (
+                    "You are a helpful and strict Procurement Compliance Assistant.\n"
+                    "Answer user questions based ONLY on the retrieved SVP Policy rules provided below.\n"
+                    "If the answer cannot be found in the policy text, politely inform the user that it is not covered in the loaded SVP process document.\n\n"
+                    f"--- RETRIEVED SVP POLICY TEXT ---\n{retrieved_context}\n--------------------"
+                )
+
+                try:
+                    client = OpenAI(api_key=user_api_key)
+                    messages = [{"role": "system", "content": chat_system_prompt}]
+                    for m in st.session_state.chat_messages[-6:]:
+                        messages.append({"role": m["role"], "content": m["content"]})
+
+                    chat_response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=messages,
+                        temperature=0.2
+                    )
+
+                    reply = chat_response.choices[0].message.content
+                    st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+                    with st.chat_message("assistant"):
+                        st.markdown(reply)
+
+                except Exception as e:
+                    error_reply = f"Error communicating with OpenAI: {e}"
+                    st.session_state.chat_messages.append({"role": "assistant", "content": error_reply})
+                    with st.chat_message("assistant"):
+                        st.markdown(error_reply)
+
+
+# --- FOOTER ---
+st.divider()
+st.caption("GenAI Procurement Assistant • Singapore First Market Search & RAG Policy Analytics")
